@@ -1,0 +1,71 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: "VPC ID"
+  VpcCidrBlock:
+    Type: String
+    Description: "VPC CIDR Block"
+  SubnetId:
+    Type: String
+    Description: "Subnet ID"
+  TagPrefix:
+    Type: String
+    Description: "Prefix for the tags"
+    Default: "MountFsxOnEc2"
+
+Resources:
+  SecurityGroupAllowLustre:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: AllowLustre
+      GroupDescription: "Security Group that allows lustre inbound traffic"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 988
+          ToPort: 988
+          CidrIp: !Ref VpcCidrBlock
+        - IpProtocol: tcp
+          FromPort: 1021
+          ToPort: 1023
+          CidrIp: !Ref VpcCidrBlock
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagPrefix}-SecurityGroupAllowLustre"
+
+  LustreBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagPrefix}-LustreBucket"
+
+  LustreFileSystem:
+    Type: "AWS::FSx::FileSystem"
+    Properties:
+      FileSystemType: LUSTRE
+      LustreConfiguration:
+        AutoImportPolicy: NEW_CHANGED
+        ImportPath: !Sub "s3://${LustreBucket}"
+        ExportPath: !Sub "s3://${LustreBucket}"
+        DeploymentType: SCRATCH_1
+      SecurityGroupIds:
+        - !Ref SecurityGroupAllowLustre
+      StorageCapacity: 1200
+      StorageType: SSD
+      SubnetIds:
+        - !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagPrefix}-FSxLustre"
+
+Outputs:
+  FsxId:
+    Value: !Ref LustreFileSystem
+  Bucket:
+    Value: !Ref LustreBucket

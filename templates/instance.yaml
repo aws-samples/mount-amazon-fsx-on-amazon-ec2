@@ -1,0 +1,140 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: "VPC ID"
+  SubnetId:
+    Type: String
+    Description: "Subnet ID"
+  KeyName:
+    Type: String
+    Description: "KeyPair Name"
+  SshAllowedCidr:
+    Type: String
+    Description: "Network CIDR that allows ssh into the instances. The default value is 0.0.0.0/0."
+    Default: "0.0.0.0/0"
+  FsxId:
+    Type: String
+    Description: "FSx ID"
+  AMI:
+    Type: AWS::EC2::Image::Id
+    Description: "AMI of the instance"
+  TagPrefix:
+    Type: String
+    Description: "Prefix for the tags"
+    Default: "MountFsxOnEc2"
+
+Resources:
+  SecurityGroupAllowSsh:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: AlloSsh
+      GroupDescription: "Security Group used during prototyping that allows ssh"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshAllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagPrefix}-SecurityGroupAllowSsh"
+
+  InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonFSxFullAccess"
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagPrefix}-FSxFullAccess"
+
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref InstanceRole
+
+  LaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AMI
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref SecurityGroupAllowSsh
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              sudo yum update -y
+
+              # https://docs.aws.amazon.com/ja_jp/fsx/latest/LustreGuide/getting-started-step2.html
+              sudo amazon-linux-extras install -y lustre2.10
+
+              # Define the script that is executed by systemd
+              # https://docs.aws.amazon.com/ja_jp/fsx/latest/LustreGuide/getting-started-step2.html
+              sudo tee /usr/local/bin/mountfsx <<EOF
+              #!/bin/bash
+              sudo mkdir -p /mnt/fsx
+              sudo mount -t lustre -o noatime,flock ${FsxId}.fsx.${Region}.amazonaws.com@tcp:/fsx /mnt/fsx
+              EOF
+
+              sudo chmod 755 /usr/local/bin/mountfsx
+
+              # Create a service file
+              sudo tee /etc/systemd/system/mountfsx.service <<EOF
+              [Unit]
+              Description=mount fsx lustre on /mnt/fsx
+              After=network-online.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/usr/local/bin/mountfsx
+
+              [Install]
+              WantedBy=network-online.target
+              EOF
+
+              # Enable the service
+              sudo systemctl daemon-reload
+              sudo systemctl enable mountfsx
+
+              # Update and reboot
+              sudo yum -y update kernel && sudo reboot
+            - {
+              FsxId: !Ref FsxId,
+              Region: !Ref "AWS::Region"
+            }
+
+  TestInstance:
+    Type: "AWS::EC2::Instance"
+    DependsOn:
+      - SecurityGroupAllowSsh
+    Properties:
+      InstanceType: t2.micro
+      SubnetId: !Ref SubnetId
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt "LaunchTemplate.LatestVersionNumber"
+      Tags:
+        - Key: Name
+          Value: !Sub "${TagPrefix}-Instance"
